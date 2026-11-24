@@ -1,0 +1,28 @@
+[project]
+name = "cadbuildr-frames"
+version = "0.1.0"
+description = "Structural and woodworking frames (weldments) on CADbuildr foundation: profiles swept along a skeleton, corner trims, gussets, end caps and a cut list"
+readme = "README.md"
+requires-python = ">=3.10.0,<4.0.0"
+authors = [
+    {name = "CADbuildr Team"},
+]
+dependencies = [
+    "cadbuildr-foundation>=0.2.20,<0.3.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0.0,<9.0.0",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = [
+    "cadbuildr",
+]
+
+[build-system]
+requires = [
+    "hatchling>=1.27.0",
+]
+build-backend = "hatchling.build"
