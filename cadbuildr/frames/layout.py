@@ -15,7 +15,8 @@ Conventions, per member end:
 How each node is treated:
 
 - one free end -> square cut at the node (``free``); end caps go here.
-- one end lying inside another straight member (a T) -> butt / cope onto it.
+- ends lying inside another member (a T; or several ends, e.g. two rails
+  meeting at a post's mid-height) -> each butted / coped onto it.
 - two ends -> the frame's ``corner`` rule: ``miter`` (both cut on the
   bisector plane), ``butt`` (the longer member runs through, the other is
   trimmed to its face) or ``coped`` (as butt, but the trimmed member is cut to
@@ -29,7 +30,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
-from typing import Literal, Sequence
+from typing import Callable, Literal, Optional, Sequence
 
 from .geometry import (
     NODE_TOLERANCE,
@@ -144,6 +145,77 @@ class GussetLayout:
     offset: float  # plate mid-plane offset along normal
 
 
+# How the members meet at a node (``Junction.kind``).
+JunctionKind = Literal["free", "continuous", "corner", "tee", "multi"]
+
+
+@dataclass(frozen=True)
+class JunctionEnd:
+    """One member taking part in a junction. ``which`` is the member end at
+    the node (``"start"`` / ``"end"``), or ``None`` when the node lies inside
+    the member (the host of a T-junction)."""
+
+    member: MemberLayout
+    which: str | None
+
+    @property
+    def profile(self) -> Profile:
+        return self.member.profile
+
+    @property
+    def cut(self) -> EndCut | None:
+        return self.member.cut(self.which) if self.which else None
+
+    @property
+    def into(self) -> Vec:
+        """Unit direction from the node into this member's material (for a
+        T host: the member's own direction, it continues both ways)."""
+        if self.which is None:
+            return self.member.segment.start_tangent
+        return self.member.into(self.which)
+
+    @property
+    def basis(self) -> Basis:
+        """The member's orientation (x along the member, y / z = profile u /
+        v) at the node."""
+        if self.which is None:
+            return self.member.basis
+        return self.member.frame_at(self.which)
+
+
+@dataclass(frozen=True)
+class Junction:
+    """A skeleton node and how its members are joined — what a frame's
+    ``connector`` hook is called with.
+
+    - ``kind``: ``"free"`` (one open end), ``"continuous"`` (two collinear
+      ends), ``"corner"`` (two ends at an angle), ``"tee"`` (an end landing
+      inside another member) or ``"multi"`` (three or more ends).
+    - ``through``: the member that runs through (``None`` for free,
+      continuous and mitered nodes); ``butting``: the members trimmed to it
+      (for a miter / free / continuous node: every end).
+    - ``corner``: the frame's corner rule (``miter`` / ``butt`` / ``coped``).
+    """
+
+    index: int
+    node: Vec
+    kind: JunctionKind
+    corner: str
+    through: JunctionEnd | None
+    butting: tuple[JunctionEnd, ...]
+    up: Vec
+
+    @property
+    def ends(self) -> tuple[JunctionEnd, ...]:
+        return ((self.through,) if self.through else ()) + self.butting
+
+
+# Optional override of which member runs through a butt / coped / multi node:
+# called with the node and its member ends, returns an index into them, or
+# None to keep the default rule (arc, then longest, then first).
+ThroughChooser = Callable[[Vec, Sequence[JunctionEnd]], Optional[int]]
+
+
 @dataclass
 class FrameLayout:
     members: list[MemberLayout]
@@ -151,6 +223,7 @@ class FrameLayout:
     # two-member corners, keyed by node: (member a, end a, member b, end b)
     corners: list[tuple[MemberLayout, str, MemberLayout, str]]
     tolerance: float
+    junctions: list[Junction] = field(default_factory=list)
 
     def free_ends(self) -> list[tuple[MemberLayout, str]]:
         """Member ends that connect to nothing (where end caps go)."""
@@ -270,6 +343,7 @@ def solve_layout(
     profiles: Sequence[Profile],
     corner: CornerType,
     up: Vec | None,
+    choose_through: ThroughChooser | None = None,
 ) -> FrameLayout:
     if corner not in CORNER_TYPES:
         raise ValueError(f"corner must be one of {CORNER_TYPES}, got {corner!r}")
@@ -295,19 +369,27 @@ def solve_layout(
     tol = max(NODE_TOLERANCE, 1e-9 * span)
     straight = math.cos(math.radians(COLLINEAR_TOLERANCE_DEG))
     corners: list[tuple[MemberLayout, str, MemberLayout, str]] = []
+    records: list[tuple[Vec, str, JunctionEnd | None, list[JunctionEnd]]] = []
+
+    def record(node, kind, through, butting):
+        records.append((node, kind, through, [JunctionEnd(m, w) for m, w in butting]))
 
     for node, ends in _cluster_ends(members, tol):
-        if len(ends) == 1:
-            m, w = ends[0]
-            host = next(
-                (
-                    h
-                    for h in members
-                    if h is not m and h.segment.contains_interior(node, tol) is not None
-                ),
-                None,
-            )
-            if host is not None:
+        # a node lying inside another member: every end there is butted
+        # (coped) onto that host — one end is a T, several ends (e.g. two
+        # shelf rails meeting at a table leg) all land on the host's faces
+        ending = {id(m) for m, _ in ends}
+        host = next(
+            (
+                h
+                for h in members
+                if id(h) not in ending
+                and h.segment.contains_interior(node, tol) is not None
+            ),
+            None,
+        )
+        if host is not None:
+            for m, w in ends:
                 _butt(
                     host,
                     None,
@@ -318,21 +400,35 @@ def solve_layout(
                     node,
                     corner == "coped",
                 )
+            record(node, "tee", JunctionEnd(host, None), ends)
+            continue
+        if len(ends) == 1:
+            record(node, "free", None, ends)
             continue
         if len(ends) == 2:
             (a, wa), (b, wb) = ends
             da, db = a.into(wa), b.into(wb)
             if dot(da, db) < -straight:
                 a.cut(wa).kind = b.cut(wb).kind = "continuous"
+                record(node, "continuous", None, ends)
                 continue
             if dot(da, db) > straight:
                 raise ValueError(f"{a.name} and {b.name} overlap at {node}")
             corners.append((a, wa, b, wb))
             if corner == "miter":
                 _miter(a, wa, b, wb)
+                record(node, "corner", None, ends)
                 continue
         # butt / coped corner, or a node joining three or more members
-        ti = _pick_through(ends)
+        ti = None
+        if choose_through is not None:
+            ti = choose_through(node, [JunctionEnd(m, w) for m, w in ends])
+            if ti is not None and not 0 <= ti < len(ends):
+                raise ValueError(
+                    f"choose_through returned {ti!r} for a node with {len(ends)} ends"
+                )
+        if ti is None:
+            ti = _pick_through(ends)
         through, tw = ends[ti]
         reach = 0.0
         for j, (m, w) in enumerate(ends):
@@ -354,6 +450,12 @@ def solve_layout(
         tc = through.cut(tw)
         tc.kind = "through"
         tc.extension = reach
+        record(
+            node,
+            "corner" if len(ends) == 2 else "multi",
+            JunctionEnd(through, tw),
+            [e for j, e in enumerate(ends) if j != ti],
+        )
 
     for m in members:
         if isinstance(m.segment, Arc3D):
@@ -368,7 +470,11 @@ def solve_layout(
                 f"{m.name} is trimmed away entirely (cut length {m.cut_length:.3f})"
             )
 
-    return FrameLayout(members, up, corners, tol)
+    junctions = [
+        Junction(i, node, kind, corner, through, tuple(butting), up)
+        for i, (node, kind, through, butting) in enumerate(records)
+    ]
+    return FrameLayout(members, up, corners, tol, junctions)
 
 
 def _gusset(

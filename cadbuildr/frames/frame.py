@@ -26,6 +26,13 @@ from cadbuildr.foundation import (
 from cadbuildr.foundation import Frame as CoordinateFrame
 from cadbuildr.foundation.math_utils import rotation_matrix_to_quaternion
 
+from .connectors import (
+    Connection,
+    ConnectorLike,
+    Placed,
+    as_rule,
+    member_index,
+)
 from .cut_list import CutListItem, cut_list, format_cut_list
 from .geometry import (
     Arc3D,
@@ -47,6 +54,7 @@ from .layout import (
     EndCut,
     FrameLayout,
     GussetLayout,
+    Junction,
     MemberLayout,
     solve_layout,
 )
@@ -68,6 +76,13 @@ def _tf(origin: Vec, basis: Basis) -> list[list[float]]:
         [x[2], y[2], z[2], origin[2]],
         [0.0, 0.0, 0.0, 1.0],
     ]
+
+
+def basis_transform(origin: Sequence[float], basis: Basis) -> list[list[float]]:
+    """4x4 placement matrix of a local frame at ``origin`` whose x / y / z axes
+    are the world directions in ``basis`` (e.g. a member end:
+    ``basis_transform(end.member.node(end.which), end.basis)``)."""
+    return _tf(vec(origin), basis)
 
 
 def _any_perp(z: Vec) -> Vec:
@@ -121,6 +136,27 @@ class FrameMember(_LocalPart):
             self._apply_trim(which)
         if color is not None:
             self.paint(color)
+
+    # ------------------------------------------------------------ public API
+    @property
+    def length_range(self) -> tuple[float, float]:
+        """Local x range of the member's material: ``(-start extension,
+        centreline length + end extension)``."""
+        m = self.member_layout
+        return (-m.start.extension, m.centerline_length + m.end.extension)
+
+    def local_point(self, p: Sequence[float]) -> Vec:
+        """A frame (world) point in this member's local coordinates."""
+        return self._local_point(vec(p))
+
+    def local_dir(self, v: Sequence[float]) -> Vec:
+        """A frame (world) direction in this member's local coordinates."""
+        return self._local_dir(vec(v))
+
+    def plane(self, origin: Sequence[float], x: Sequence[float], z: Sequence[float]):
+        """A sketch plane in local coordinates (origin, x axis, normal z) —
+        for machining requested by a connector."""
+        return self._new_plane(vec(origin), vec(x), vec(z))
 
     # ----------------------------------------------------------------- helpers
     def _local_point(self, p: Vec) -> Vec:
@@ -358,6 +394,10 @@ class Frame(Assembly):
       plane normal (towards +Z) for a planar skeleton, else +Z.
     - ``gussets``: ``Gusset`` plates at corners; ``end_caps``: an ``EndCap``
       for every free end.
+    - ``connector``: joint hardware hook — a ``ConnectorRule`` or a callable
+      ``connector(junction) -> Connection | None`` called once per junction
+      (see ``frame.junctions``); its components are added to the frame
+      (``frame.connectors``) and its machining is applied to the members.
 
     ``frame.cut_list()`` groups identical members (profile, length, end cuts).
     """
@@ -372,6 +412,7 @@ class Frame(Assembly):
         end_caps: EndCap | None = None,
         color: str | None = STEEL_COLOR,
         plate_color: str | None = PLATE_COLOR,
+        connector: ConnectorLike | None = None,
     ):
         super().__init__()
         segments = list(skeleton)
@@ -383,16 +424,36 @@ class Frame(Assembly):
                 )
         else:
             profiles = [profile] * len(segments)
+        rule = as_rule(connector)
         layout = solve_layout(
-            segments, profiles, corner, vec(up) if up is not None else None
+            segments,
+            profiles,
+            corner,
+            vec(up) if up is not None else None,
+            choose_through=rule.choose_through if rule is not None else None,
         )
         self.layout = layout
         self.corner = corner
         self.members: list[FrameMember] = []
         self.gussets: list[GussetPlate] = []
         self.end_caps: list[EndCapPlate] = []
+        self.connectors: list = []
+        self.connections: list[tuple[Junction, Connection]] = []
+        machining: dict[int, list] = {}
+        if rule is not None:
+            for junction in layout.junctions:
+                conn = rule.connect(junction, layout)
+                if conn is None:
+                    continue
+                self.connections.append((junction, conn))
+                for ref, fn in conn.machining:
+                    machining.setdefault(member_index(ref), []).append(fn)
         for m in layout.members:
             part = FrameMember(m, layout, color)
+            if rule is not None:
+                rule.prepare_member(part)
+            for fn in machining.get(m.index, ()):
+                fn(part)
             self.members.append(part)
             self.add_component(part, tf=_tf(m.origin, m.basis))
         for i, spec in enumerate(gussets):
@@ -409,6 +470,19 @@ class Frame(Assembly):
                 )
                 self.end_caps.append(cap)
                 self.add_component(cap, tf=cap.placement)
+        for _, conn in self.connections:
+            for item in conn.components:
+                placed = item if isinstance(item, Placed) else Placed(item)
+                self.connectors.append(placed.component)
+                if placed.tf is None:
+                    self.add_component(placed.component)
+                else:
+                    self.add_component(placed.component, tf=placed.tf)
+
+    @property
+    def junctions(self) -> list[Junction]:
+        """Every skeleton node and how its members are joined."""
+        return self.layout.junctions
 
     def cut_list(self) -> list[CutListItem]:
         """Members grouped by profile, cut length and end cuts."""

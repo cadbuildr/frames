@@ -1,6 +1,6 @@
 [project]
 name = "cadbuildr-frames"
-version = "0.1.0"
+version = "0.2.0"
 description = "Structural and woodworking frames (weldments) on CADbuildr foundation: profiles swept along a skeleton, corner trims, gussets, end caps and a cut list"
 readme = "README.md"
 requires-python = ">=3.10.0,<4.0.0"

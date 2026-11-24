@@ -134,6 +134,51 @@ Members are `FrameMember` Parts named `member_1…` (skeleton order), plates
 `gusset_N` / `end_cap_N`; `frame.members`, `frame.gussets`, `frame.end_caps`
 list them.
 
+### Connector hook (joint hardware)
+
+`Frame(..., connector=...)` is the one extension point for joint hardware —
+brackets, fasteners, end caps — that a library (e.g. `cadbuildr-tslot`)
+places on the frame. It is called once per junction, after the layout is
+solved and before any member is added, so it can also machine the members.
+
+```python
+from cadbuildr.frames import Connection, ConnectorRule, Placed, basis_transform
+
+class PostsThrough(ConnectorRule):
+    def choose_through(self, node, ends):          # optional
+        return next((i for i, e in enumerate(ends) if abs(e.into[2]) > 0.99), None)
+
+    def prepare_member(self, part):                # optional, once per member
+        ...                                        # e.g. add slot anchors
+
+    def connect(self, junction, layout):           # per junction
+        if junction.kind == "free":
+            return None
+        end = junction.butting[0]
+        return Connection(
+            components=[Placed(MyBracket(), basis_transform(junction.node, end.basis))],
+            machining=[(end, lambda part: part.add_operation(...))],
+        )
+
+Frame(box_edges(600, 400, 300), profile, corner="butt", connector=PostsThrough())
+```
+
+- A plain callable `connector(junction) -> Connection | None` works too.
+- `Junction`: `kind` (`free`, `continuous`, `corner`, `tee`, `multi`),
+  `node`, `through` (the member running through, `None` for free /
+  continuous / mitered nodes), `butting` (the trimmed members), `ends`,
+  `corner`, `up`. Each `JunctionEnd` has `member` (`MemberLayout`), `which`
+  (`"start"` / `"end"`, `None` for a T host), `into` (unit direction from the
+  node into the member), `basis` (member x / profile u / v at the node),
+  `profile` and `cut` (the `EndCut`, with `extension`).
+- `choose_through` overrides "longest runs through" at butt / coped / multi
+  nodes (return an index into `ends`, or `None`).
+- Machining functions get the `FrameMember` (local coordinates: start at
+  the origin, +X along the member); `part.plane(origin, x, z)`,
+  `part.local_point(p)`, `part.local_dir(v)` and `part.length_range` help.
+- `frame.junctions`, `frame.connections` and `frame.connectors` list what
+  was found and added. Without a connector the frame is unchanged.
+
 ## Not supported (yet)
 
 - T-junctions onto arc members; mitering two arcs that are not tangent.
