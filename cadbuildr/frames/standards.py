@@ -432,6 +432,7 @@ def _designated(profile: Profile, family: str, size: str) -> Profile:
     """Keep the standard designation (``IPE200``, ``W8x18``) on the profile so
     cut lists name the stock the way it is ordered."""
     names = {
+        "RHS": f"RHS {size}",
         "IPE": size,
         "HEA": size,
         "W": size,

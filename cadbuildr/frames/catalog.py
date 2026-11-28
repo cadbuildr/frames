@@ -55,6 +55,7 @@ from .standards import (
     HEA,
     IPE,
     LUMBER,
+    PFC,
     UPN,
     profile_from_designation,
     standard_profile,
@@ -71,6 +72,7 @@ __all__ = [
     "IPEMember",
     "LadderFrame",
     "LumberMember",
+    "PFCMember",
     "RectangularFrame",
     "RectTubeMember",
     "RoundBarMember",
@@ -285,6 +287,32 @@ class ChannelMember(_StandardMember):
         self._build(size, length, hole_count, hole_size, hole_face, hole_margin)
 
 
+@part(
+    category="Members/Sections",
+    name="Parallel-flange channel (PFC)",
+    standard="BS EN 10365 / EN 10279",
+)
+@_documented(
+    "A cut length of parallel-flange channel (web at -Y, flanges open "
+    "towards +Y, root radius drawn).",
+    "PFC designation (depth x width x kg/m).",
+)
+class PFCMember(_StandardMember):
+    FAMILY = "PFC"
+    TABLE: ClassVar[dict] = PFC
+
+    def __init__(
+        self,
+        size: OneOf[PFC] = "PFC150x75x18",
+        length: _LEN = 2000,
+        hole_count: _HC = 0,
+        hole_size: HoleSize = "M12",
+        hole_face: Face = "right",
+        hole_margin: _HM = 50,
+    ):
+        self._build(size, length, hole_count, hole_size, hole_face, hole_margin)
+
+
 @part(category="Members/Sections", name="I beam (IPE)", standard="EN 10365")
 @_documented("A cut length of IPE beam (web vertical, along +Z).", "IPE designation.")
 class IPEMember(_StandardMember):
@@ -407,6 +435,7 @@ _MEMBER_CLASSES = {
     "HSS": HSSMember,
     "L": AngleMember,
     "UPN": ChannelMember,
+    "PFC": PFCMember,
     "IPE": IPEMember,
     "HEA": HEAMember,
     "W": WideFlangeMember,
@@ -500,6 +529,9 @@ class BasePlate(Part):
             )
         self.width, self.depth, self.thickness = width, depth, thickness
         self.hole_size = hole_size
+        self.designation = f"Base plate {width:g}x{depth:g}x{thickness:g} {hole_size}"
+        hole_area = 4 * 3.141592653589793 * (d / 2) ** 2
+        self.mass_kg = (width * depth - hole_area) * thickness * 7850e-9
         self.paint(PLATE_COLOR)
 
 
@@ -566,7 +598,9 @@ SECTIONS = [
     "CHS 48.3x3.2",
     "L40x40x4",
     "L50x50x5",
+    "L60x60x6",
     "UPN100",
+    "PFC150x75x18",
     "IPE100",
     "HSS1-1/2x1-1/2x1/8",
     "HSS2x2x1/8",
@@ -647,8 +681,10 @@ def _attach_feet(frame: Frame, feet: str, leg_indices, plate_size: float) -> Non
             width=plate_size, depth=plate_size, thickness=8, hole_size="M10"
         )
         plate.name = StringParameter(value=f"foot_{len(frame.feet) + 1}")
+        plate.welded_to = leg
         frame.connect(plate.interface("top"), leg.interface("end_b"))
         frame.feet.append(plate)
+    frame.refresh_bom_lines()
 
 
 @assembly(

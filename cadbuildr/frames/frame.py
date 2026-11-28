@@ -41,7 +41,27 @@ from .connectors import (
     as_rule,
     member_index,
 )
-from .cut_list import CutListItem, cut_list, format_cut_list
+from .cut_list import (
+    CutListItem,
+    SawAngle,
+    cut_list,
+    end_prep_label,
+    end_saw_angle,
+    format_cut_list,
+)
+from .end_prep import (
+    BEVEL_ISO_9692_1_V,
+    Bevel,
+    BevelError,
+    Cope,
+    CopeError,
+    check_cope_fits,
+    cope_perimeter,
+    plane_cut_perimeter,
+    profile_wall,
+)
+from .loads import DEFLECTION_LIMIT_RATIO, SpanCheck, simple_span_udl
+from .welds import Weld, butt, fillet, format_welds, weld_summary
 from .geometry import (
     Arc3D,
     Basis,
@@ -66,7 +86,7 @@ from .layout import (
     MemberLayout,
     solve_layout,
 )
-from .profiles import Profile, RoundBar, RoundTube
+from .profiles import Lumber, Profile, RectTube, RoundBar, RoundTube
 from .stock import STOCK_LENGTH_6M, Piece, StockPlan, stock_plan
 
 STEEL_COLOR = "#9aa3ad"
@@ -386,6 +406,182 @@ class FrameMember(_LocalPart):
                 )
             anchors.append(anchor)
         return anchors
+
+    # ------------------------------------------------------- end preparation
+    def _end_frame(self, which: str) -> tuple[Vec, Vec, Vec]:
+        """Node, into-direction and lateral (+Y side) axis of end ``which``
+        in local coordinates (straight members)."""
+        if which not in ("start", "end"):
+            raise ValueError(f"which must be 'start' or 'end', got {which!r}")
+        if isinstance(self.member_layout.segment, Arc3D):
+            raise CopeError(
+                f"{self.member_layout.name}: end preparation on bent members is "
+                "not supported"
+            )
+        if which == "start":
+            return (0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (0.0, 1.0, 0.0)
+        length = self.member_layout.centerline_length
+        return (length, 0.0, 0.0), (-1.0, 0.0, 0.0), (0.0, -1.0, 0.0)
+
+    def cope(self, which: str, cope: Cope) -> None:
+        """Cope (saddle-cut) end ``which`` onto ``cope.host``: subtract the
+        host's outer profile, extruded along the host axis, from this
+        member — the exact saddle on both walls (see
+        :mod:`cadbuildr.frames.end_prep`). The host axis passes through the
+        end's node at ``cope.angle`` to this member (in the local XY plane)
+        and ``cope.offset`` below its axis (local -Z). The member's material
+        must reach the host (``PreparedTube`` sets the end extension from
+        :func:`~cadbuildr.frames.end_prep.cope_extent`)."""
+        node, d, y = self._end_frame(which)
+        m = self.member_layout
+        check_cope_fits(m.profile, cope)
+        a = math.radians(cope.angle)
+        h = add(scale(d, math.cos(a)), scale(y, math.sin(a)))
+        origin = add(node, (0.0, 0.0, -float(cope.offset)))
+        plane = self._new_plane(origin, (0.0, 0.0, 1.0), h)
+        span = 4.0 * (self._reach() + max(cope.host.size)) / math.sin(a) + 50.0
+        self.add_operation(
+            Extrusion(cope.host.outer(Sketch(plane)), span, start=-span, cut=True)
+        )
+        cut = m.cut(which)
+        cut.kind = "coped"
+        cut.cope = cope
+
+    def bevel(self, which: str, bevel: Bevel = BEVEL_ISO_9692_1_V) -> None:
+        """Weld-prep bevel on square end ``which`` of a round or
+        square / rectangular tube: the outside of the wall is chamfered at
+        ``bevel.angle`` from the end plane, leaving ``bevel.root_face`` of
+        the wall square (single-V butt preparation, ISO 9692-1 / ASME
+        B16.25). Round tubes get a true conical bevel (a revolved cut);
+        rectangular tubes one plane wedge per wall."""
+        m = self.member_layout
+        _, d, _ = self._end_frame(which)
+        cut = m.cut(which)
+        if cut.needs_trim or cut.cope is not None or cut.cope_member is not None:
+            raise BevelError(
+                f"{m.name}: bevel the {which} end only when it is cut square "
+                f"(it is {cut.kind})"
+            )
+        prof = m.profile
+        if not isinstance(prof, (RoundTube, RectTube)):
+            raise BevelError(
+                f"{m.name}: weld-prep bevels are for round / rectangular tube, not "
+                f"{prof.designation}"
+            )
+        t = profile_wall(prof)
+        c = float(bevel.root_face)
+        if c >= t:
+            raise BevelError(
+                f"{m.name}: root face {c:g} mm leaves no bevel on a {t:g} mm wall"
+            )
+        x0, x1 = self.length_range
+        x_e = x0 if which == "start" else x1
+        out = -d[0]  # +1: material ends towards +X
+        k = math.tan(math.radians(bevel.angle))
+        margin = 1.0
+
+        def wedge(sk: Sketch, inner: float, outer: float):
+            pencil = sk.pencil
+            pencil.move_to(out * margin, inner)
+            pencil.line_to(0.0, inner)
+            pencil.line_to(-out * (outer + margin - inner) * k, outer + margin)
+            pencil.line_to(out * margin, outer + margin)
+            return pencil.close()
+
+        if isinstance(prof, RoundTube):
+            ro = prof.diameter / 2.0
+            sk = Sketch(self._new_plane((x_e, 0.0, 0.0), (1.0, 0.0, 0.0), (0.0, -1.0, 0.0)))
+            shape = wedge(sk, ro - t + c, ro)
+            axis = Axis(Line(Point(sk, 0.0, 0.0), Point(sk, 1.0, 0.0)))
+            self.add_operation(Lathe(shape, axis, angle=360.0, cut=True))
+        else:
+            for du, dv in MEMBER_FACES.values():
+                n = (0.0, du, dv)
+                reach = prof.support(du, dv)
+                across = prof.support(dv, du)
+                z = cross((1.0, 0.0, 0.0), n)
+                sk = Sketch(self._new_plane((x_e, 0.0, 0.0), (1.0, 0.0, 0.0), z))
+                shape = wedge(sk, reach - t + c, reach)
+                self.add_operation(
+                    Extrusion(shape, across + margin, start=-(across + margin), cut=True)
+                )
+        cut.bevel = bevel
+
+    def saw_angle(self, which: str) -> SawAngle | None:
+        """Saw setting of end ``which`` (``None``: a saddle cope, not a saw
+        cut)."""
+        return end_saw_angle(self.member_layout, which, self.frame_layout.members)
+
+    # ------------------------------------------------------------ load check
+    def apply_udl(
+        self,
+        udl: float,
+        span: float | None = None,
+        grade: str | float = "S235",
+        limit_ratio: float = DEFLECTION_LIMIT_RATIO,
+        self_weight: bool = True,
+    ) -> SpanCheck:
+        """Declare a uniformly distributed load (kN/m) on this member as a
+        simply supported span (default: its centre-line length). The
+        member's ``__checks__`` then reports the deflection (L / 250) and
+        yield check (:mod:`cadbuildr.frames.loads`); returns the result."""
+        span = float(span) if span is not None else self.member_layout.centerline_length
+        self._load = dict(
+            udl=float(udl),
+            span=span,
+            grade=grade,
+            limit_ratio=limit_ratio,
+            self_weight=self_weight,
+        )
+        return self.span_check()
+
+    def span_check(self) -> SpanCheck | None:
+        """The load check declared with :meth:`apply_udl` (``None`` if none)."""
+        load = getattr(self, "_load", None)
+        if not load:
+            return None
+        return simple_span_udl(
+            self.member_layout.profile,
+            load["span"],
+            load["udl"],
+            grade=load["grade"],
+            limit_ratio=load["limit_ratio"],
+            self_weight=load["self_weight"],
+            density=self.density,
+        )
+
+    def __checks__(self) -> list:
+        result = self.span_check()
+        return result.issues(self.name.value) if result is not None else []
+
+    # ------------------------------------------------------------------- BOM
+    @property
+    def density(self) -> float:
+        """Material density (kg/m^3): softwood for lumber, else steel."""
+        return SOFTWOOD_DENSITY if isinstance(self.member_layout.profile, Lumber) else STEEL_DENSITY
+
+    def __bom__(self) -> dict:
+        """BOM contract (``cadbuildr-bom``): one stock piece with its cut
+        length, saw angles and end preparation."""
+        m = self.member_layout
+        saws = [self.saw_angle(w) for w in ("start", "end")]
+        return {
+            "designation": f"{m.profile.designation} x {m.cut_length:.0f}",
+            "category": "Frames/Members",
+            "procurement": "stock",
+            "stock": m.profile.designation,
+            "cut_length": round(m.cut_length, 1),
+            "mass_kg": m.cut_length / 1000.0 * m.profile.mass_per_m(self.density),
+            "mass_source": "computed",
+            "extra": {
+                "end_cuts": [m.start.kind, m.end.kind],
+                "saw_angles": ["cope" if a is None else str(a) for a in saws],
+                "end_preps": [
+                    end_prep_label(m, w, self.frame_layout.members)
+                    for w in ("start", "end")
+                ],
+            },
+        }
 
     # ----------------------------------------------------------------- helpers
     def _local_point(self, p: Vec) -> Vec:
@@ -819,6 +1015,7 @@ class Frame(Assembly):
                     self.add_component(placed.component)
                 else:
                     self.add_component(placed.component, tf=placed.tf)
+        self.refresh_bom_lines()
 
     @property
     def junctions(self) -> list[Junction]:
@@ -876,6 +1073,205 @@ class Frame(Assembly):
             Piece(m.profile.designation, m.cut_length, m.name)
             for m in self.layout.members
         ]
+
+    # ----------------------------------------------------------------- welds
+    def welds(self, throat: float | None = None, process: int | None = 135) -> list[Weld]:
+        """Every welded joint as metadata (:mod:`cadbuildr.frames.welds`):
+
+        - mitred corners: an all-round butt weld on the mitre outline
+          (square butt; single-V when the ends carry a ``Bevel``);
+        - butt / coped / tee / multi nodes: an all-round fillet on each
+          trimmed member's end outline (the plane-cut outline, or the 3D
+          saddle of a cope onto a round host);
+        - gussets: a fillet along each leg, both faces;
+        - end caps and feet (``frame.feet``): an all-round fillet on the
+          member's outside.
+
+        ``throat`` overrides the default fillet size (``welds.default_throat``
+        of the thinner part); ``process`` is the ISO 4063 number on every
+        symbol."""
+        members = self.layout.members
+        out: list[Weld] = []
+
+        def local_normal(m: MemberLayout, which: str) -> Vec:
+            cut = m.cut(which)
+            if cut.trim_normal is None:
+                return (1.0, 0.0, 0.0)
+            return to_local(m.frame_at(which), cut.trim_normal)
+
+        for j in self.layout.junctions:
+            label = f"junction {j.index + 1}"
+            if j.kind in ("free", "continuous"):
+                continue
+            if j.through is None:  # mitred corner
+                a, b = j.butting
+                length = plane_cut_perimeter(a.profile, local_normal(a.member, a.which))
+                wall = min(profile_wall(a.profile), profile_wall(b.profile))
+                bevel = a.cut.bevel if a.cut is not None else None
+                out.append(
+                    butt(label, (a.member.name, b.member.name), length, wall, bevel, True, process)
+                )
+                continue
+            host = j.through.member
+            for e in j.butting:
+                m = e.member
+                cut = m.cut(e.which)
+                if cut.cope_member is not None and isinstance(host.profile, (RoundTube, RoundBar)):
+                    host_axis = host.into(j.through.which) if j.through.which else host.segment.start_tangent
+                    ang = math.degrees(math.acos(min(1.0, abs(dot(e.into, host_axis)))))
+                    length = cope_perimeter(m.profile, Cope(host.profile, max(ang, 15.0)))
+                else:
+                    length = plane_cut_perimeter(m.profile, local_normal(m, e.which))
+                t_min = min(profile_wall(m.profile), profile_wall(host.profile))
+                out.append(
+                    fillet(label, (m.name, host.name), length, t_min, throat, 1, True, process)
+                )
+        for g in self.gussets:
+            ga = members[g.gusset_layout.member_a]
+            gb = members[g.gusset_layout.member_b]
+            for leg in (ga, gb):
+                t_min = min(g.thickness, profile_wall(leg.profile))
+                out.append(
+                    fillet(g.name.value, (g.name.value, leg.name), g.size, t_min, throat, 2, False, process)
+                )
+        for cap in self.end_caps:
+            m = cap.member_layout
+            length = plane_cut_perimeter(m.profile, (1.0, 0.0, 0.0))
+            t_min = min(cap.thickness, profile_wall(m.profile))
+            out.append(
+                fillet(cap.name.value, (cap.name.value, m.name), length, t_min, throat, 1, True, process)
+            )
+        for foot in getattr(self, "feet", None) or []:
+            leg = getattr(foot, "welded_to", None)
+            if leg is None:
+                continue
+            m = leg.member_layout
+            length = plane_cut_perimeter(m.profile, (1.0, 0.0, 0.0))
+            t_min = min(float(foot.thickness), profile_wall(m.profile))
+            out.append(
+                fillet(foot.name.value, (foot.name.value, m.name), length, t_min, throat, 1, True, process)
+            )
+        return out
+
+    def weld_length(self, throat: float | None = None) -> float:
+        """Total weld run (mm, every side counted)."""
+        return sum(w.total_length for w in self.welds(throat))
+
+    def weld_table(self, throat: float | None = None) -> str:
+        """The weld list as a plain-text table (ISO 2553 designations)."""
+        return format_welds(self.welds(throat))
+
+    def bom(self, density: float = STEEL_DENSITY, throat: float | None = None) -> list[dict]:
+        """Bill of materials rows: cut members (one row per cut-list item
+        with saw angles), plates (gussets, end caps, feet) and one row per
+        weld type and size with its total length and deposit mass. The last
+        row (``kind = "total"``) carries the total weld length and mass."""
+        rows: list[dict] = []
+        for r in self.cut_list():
+            per_m = next(
+                m.profile.mass_per_m(density)
+                for m in self.layout.members
+                if m.name in r.members
+            )
+            rows.append(
+                {
+                    "kind": "member",
+                    "designation": r.profile,
+                    "qty": r.count,
+                    "length_mm": r.length,
+                    "saw": ["cope" if a is None else str(a) for a in r.saw_angles],
+                    "ends": list(r.end_cuts),
+                    "preps": [p for p in r.end_preps if p],
+                    "mass_kg": r.count * r.length / 1000.0 * per_m,
+                }
+            )
+        plates: dict[str, dict] = {}
+        for g in self.gussets:
+            key = f"Gusset {g.size:g} x {g.thickness:g}"
+            row = plates.setdefault(key, {"kind": "plate", "designation": key, "qty": 0, "mass_kg": 0.0})
+            row["qty"] += 1
+            row["mass_kg"] += g.plate_area * g.thickness * 1e-9 * density
+        for cap in self.end_caps:
+            m = cap.member_layout
+            key = f"End cap {m.profile.designation} t{cap.thickness:g}"
+            row = plates.setdefault(key, {"kind": "plate", "designation": key, "qty": 0, "mass_kg": 0.0})
+            row["qty"] += 1
+            row["mass_kg"] += m.profile.outer_area * cap.thickness * 1e-9 * density
+        for foot in getattr(self, "feet", None) or []:
+            key = getattr(foot, "designation", None) or "Base plate"
+            row = plates.setdefault(key, {"kind": "plate", "designation": key, "qty": 0, "mass_kg": 0.0})
+            row["qty"] += 1
+            row["mass_kg"] += float(getattr(foot, "mass_kg", 0.0) or 0.0)
+        rows += list(plates.values())
+        welds = self.welds(throat)
+        for key, w in weld_summary(welds).items():
+            rows.append(
+                {
+                    "kind": "weld",
+                    "designation": f"{key} (ISO 2553)",
+                    "qty": int(w["count"]),
+                    "length_mm": w["length_mm"],
+                    "mass_kg": w["deposit_kg"],
+                }
+            )
+        rows.append(
+            {
+                "kind": "total",
+                "designation": "total",
+                "mass_kg": sum(r.get("mass_kg", 0.0) for r in rows),
+                "weld_length_mm": sum(w.total_length for w in welds),
+            }
+        )
+        return rows
+
+    def bom_table(self, density: float = STEEL_DENSITY, throat: float | None = None) -> str:
+        """:meth:`bom` as a plain-text table."""
+        lines = ["Kind    Qty  Designation                       Length   Mass kg  Notes"]
+        for r in self.bom(density, throat):
+            if r["kind"] == "total":
+                lines.append(
+                    f"total                                               "
+                    f"{r['mass_kg']:8.2f}  weld length {r['weld_length_mm']:.0f} mm"
+                )
+                continue
+            length = f"{r['length_mm']:.0f}" if "length_mm" in r else ""
+            notes = ""
+            if r["kind"] == "member":
+                notes = f"saw {'/'.join(r['saw'])}" + (f"; {'; '.join(r['preps'])}" if r["preps"] else "")
+            lines.append(
+                f"{r['kind']:<7} {r['qty']:<4} {r['designation']:<33} {length:>7}  "
+                f"{r['mass_kg']:7.2f}  {notes}".rstrip()
+            )
+        return "\n".join(lines)
+
+    def apply_udl(self, member: str | int, udl: float, **kwargs) -> SpanCheck:
+        """:meth:`FrameMember.apply_udl` on one member (index or name)."""
+        return self.member(member).apply_udl(udl, **kwargs)
+
+    def refresh_bom_lines(self, throat: float | None = None) -> None:
+        """Add the weld totals as non-geometric BOM lines when
+        ``cadbuildr-bom`` is installed (``add_bom_line``, unit mm); replaces
+        lines a previous call added. Called by ``Frame``; call it again
+        after adding parts that are welded on."""
+        try:
+            from cadbuildr.bom import add_bom_line
+        except ImportError:
+            return
+        lines = self.__dict__.get("_bom_lines")
+        if lines:
+            self.__dict__["_bom_lines"] = [
+                i for i in lines if not (i.category or "").startswith("Frames/Welds")
+            ]
+        for key, w in weld_summary(self.welds(throat)).items():
+            add_bom_line(
+                self,
+                designation=f"Weld {key} (ISO 2553)",
+                quantity=round(w["length_mm"], 1),
+                unit="mm",
+                category="Frames/Welds",
+                procurement="make",
+                notes=f"{int(w['count'])} joints, {w['deposit_kg']:.3f} kg deposit",
+            )
 
     def stock_plan(
         self, stock_length: float = STOCK_LENGTH_6M, kerf: float = 3.0
