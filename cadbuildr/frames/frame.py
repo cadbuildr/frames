@@ -883,6 +883,8 @@ class Frame(Assembly):
       (``frame.connectors``) and its machining is applied to the members.
     - ``holes``: ``HolePattern`` rows drilled into members (each hole gets a
       ``ScrewHole`` interface a fastener mates onto).
+    - ``welded``: report welds (``frame.welds()``, weld BOM lines); False
+      for bolted frames.
 
     Placement is by anchors and joints, not transforms: every member is
     fixed to the frame by its ``node_a`` anchor (a rigid joint to the
@@ -908,8 +910,10 @@ class Frame(Assembly):
         plate_color: str | None = PLATE_COLOR,
         connector: ConnectorLike | None = None,
         holes: Sequence[HolePattern] = (),
+        welded: bool = True,
     ):
         super().__init__()
+        self.welded = welded
         segments = list(skeleton)
         if isinstance(profile, (list, tuple)):
             profiles = list(profile)
@@ -1089,9 +1093,26 @@ class Frame(Assembly):
 
         ``throat`` overrides the default fillet size (``welds.default_throat``
         of the thinner part); ``process`` is the ISO 4063 number on every
-        symbol."""
+        symbol.
+
+        Members whose profile has no outline (``Profile.outline`` not
+        implemented — e.g. bolted T-slot extrusions) are not welded and are
+        skipped; ``Frame(..., welded=False)`` turns welds off entirely."""
+        if not self.welded:
+            return []
         members = self.layout.members
         out: list[Weld] = []
+        outlined: dict[int, bool] = {}
+
+        def has_outline(profile) -> bool:
+            key = id(profile)
+            if key not in outlined:
+                try:
+                    profile.outline()
+                    outlined[key] = True
+                except NotImplementedError:
+                    outlined[key] = False
+            return outlined[key]
 
         def local_normal(m: MemberLayout, which: str) -> Vec:
             cut = m.cut(which)
@@ -1102,6 +1123,8 @@ class Frame(Assembly):
         for j in self.layout.junctions:
             label = f"junction {j.index + 1}"
             if j.kind in ("free", "continuous"):
+                continue
+            if not all(has_outline(e.profile) for e in j.ends):
                 continue
             if j.through is None:  # mitred corner
                 a, b = j.butting
@@ -1127,6 +1150,8 @@ class Frame(Assembly):
                     fillet(label, (m.name, host.name), length, t_min, throat, 1, True, process)
                 )
         for g in self.gussets:
+            if not has_outline(members[g.gusset_layout.member_a].profile):
+                continue
             ga = members[g.gusset_layout.member_a]
             gb = members[g.gusset_layout.member_b]
             for leg in (ga, gb):
@@ -1136,6 +1161,8 @@ class Frame(Assembly):
                 )
         for cap in self.end_caps:
             m = cap.member_layout
+            if not has_outline(m.profile):
+                continue
             length = plane_cut_perimeter(m.profile, (1.0, 0.0, 0.0))
             t_min = min(cap.thickness, profile_wall(m.profile))
             out.append(
@@ -1146,6 +1173,8 @@ class Frame(Assembly):
             if leg is None:
                 continue
             m = leg.member_layout
+            if not has_outline(m.profile):
+                continue
             length = plane_cut_perimeter(m.profile, (1.0, 0.0, 0.0))
             t_min = min(float(foot.thickness), profile_wall(m.profile))
             out.append(

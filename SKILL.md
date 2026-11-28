@@ -1,6 +1,6 @@
 ---
 name: cadbuildr-frames
-description: How to build welded / structural frames (weldments) with cadbuildr.frames — standard sections (EN 10219 SHS/RHS/CHS, ASTM A500 HSS, angle, UPN, IPE, HEA, AISC W, bar, lumber) swept along a skeleton of centre lines, miter / butt / coped corners, gussets, end caps, bolt-hole rows, cut list, weight and stock plan, member anchors/interfaces to mate parts onto a frame, ready-made parametric frames (table/workbench, shelving, ladder/chassis, gate), and the connector hook for joint hardware.
+description: How to build welded / structural frames (weldments) with cadbuildr.frames — standard sections (EN 10219 SHS/RHS/CHS, ASTM A500 HSS, angle, UPN, IPE, HEA, AISC W, bar, lumber) swept along a skeleton of centre lines, miter / butt / coped corners, gussets, end caps, bolt-hole rows, cut list, weight and stock plan, member anchors/interfaces to mate parts onto a frame, ready-made parametric frames (table/workbench, shelving, ladder/chassis, gate), tube end prep (true saddle copes, mitres, weld-prep bevels), weld metadata (ISO 2553 symbols, weld lengths in the BOM), saw angles in the cut list, anchor-bolt base plates, gussets, end caps, a simple-span UDL load check, and the connector hook for joint hardware.
 ---
 
 # cadbuildr-frames
@@ -163,3 +163,71 @@ something that is not a two-member corner, a profile list of the wrong
 length, a hole running off its member / face, a shelf outside the legs.
 Not supported yet: T-junctions onto arcs, mitering two non-tangent arcs,
 weld beads, tube corner radii, holes on bent members.
+
+## Welded / fabricated frames
+
+### Tube end prep (`PreparedTube`, `FrameMember.cope` / `.bevel`)
+
+```python
+from cadbuildr.frames import PreparedTube, cope_template_svg
+
+post = PreparedTube(section="CHS 42.4x3.2", length=900, end_a="cope",
+                    cope_host="CHS 48.3x3.2", cope_angle=90, cope_offset=0)
+brace = PreparedTube(section="CHS 33.7x2.6", length=600, end_a="cope", end_b="cope",
+                     cope_host="CHS 60.3x3.2", cope_angle=45)
+rail = PreparedTube(section="SHS 40x40x3", length=600, end_a="miter", end_b="miter",
+                    miter_a=45, miter_b=45)              # miter_axis="u" tilts the cut
+spool = PreparedTube(section="CHS 114.3x4", end_a="bevel", bevel_angle=37.5, root_face=1.6)
+post.cut_length, post.saw_angle("start"), post.welds, post.cope_template()
+open("cope.svg", "w").write(cope_template_svg(42.4, 48.3, 90))   # 1:1 wrap template
+```
+
+- `length` is node to node (host axis / mitre plane / square end).
+- Copes subtract the host's outer profile extruded along the host axis: the
+  exact saddle (round host) or a plane (SHS/RHS host). Inside a `Frame`,
+  `corner="coped"` does the same at every butted node.
+- Errors: `CopeError` (branch wider than host, angle < 15 deg, stub left),
+  `BevelError` (root face >= wall, end not square), `EndPrepError`.
+
+### Welds, cut list, BOM
+
+```python
+frame.cut_list_table()    # Saw 1 / Saw 2 columns: "45.0", "0.0/30.0b" (mitre/bevel), "cope"
+frame.welds()             # [Weld(joint, parts, kind, length, throat, runs, symbol)]
+frame.weld_table()        # ISO 2553 designations "a3 ◺ (all round) < 135 / ISO 5817-C"
+frame.bom_table()         # members + plates + weld rows; last row = total weld length
+frame.welds(throat=4)     # override the default throat a = 0.7 t_min (>= 3 mm)
+Frame(..., welded=False)  # bolted frames: no welds
+```
+
+Weld BOM lines go to `cadbuildr-bom` automatically when it is installed
+(`frame.refresh_bom_lines()` after welding more parts on, e.g. `frame.feet`
+with `plate.welded_to = leg`).
+
+### Load check (`__checks__`, never override `check()`)
+
+```python
+frame.apply_udl("member_1", 3.0, span=1500, grade="S235")   # kN/m
+frame.check()             # frames.load.deflection / frames.load.yield errors, or frames.load.ok info
+from cadbuildr.frames import simple_span_udl, load_table, format_load_table
+print(format_load_table(p, load_table(p, [1000, 1500, 2000], grade="S355")))
+```
+
+delta = 5wL^4/(384EI) vs L/250, sigma = wL^2/(8 W_el) vs f_y. Not checked:
+LTB, shear, local buckling. `SimplySupportedBeam(section, span, udl)` is
+the configurable.
+
+### Plates
+
+| Class | What |
+|---|---|
+| `AnchorBasePlate(column, width, depth, thickness, anchor, hole, pattern, edge)` | 2/4/6/8 anchors, EN 1090-2 holes, EN 1993-1-8 edge/spacing + washer checks, `top` PlaneFace mates onto a column end |
+| `CornerGusset(leg, width, thickness, inner_radius)` | L-shaped knee plate, true inner radius |
+| `TubeEndCap(section, style="plate"/"inset")` | welded cap; `seat` mates onto a member `end_a`/`end_b` |
+| `TriangularGusset`, `BasePlate` | as before |
+
+Sections now carry radii: `standard_profile("L", ...)` (EN 10056-1 r1/r2),
+`"UPN"` (DIN 1026-1, 8 % taper), `"PFC"` (BS EN 10365), IPE/HEA root radii,
+SHS/RHS EN 10219-2 corner radii. `profile.section_properties()` gives
+area, I, W_el. Demos: `examples/welded_workbench.py`,
+`examples/trailer_ladder_frame.py`.

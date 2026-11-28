@@ -160,13 +160,15 @@ def test_standard_profiles_and_designations():
 @pytest.mark.parametrize(
     "designation, kg_per_m, tol",
     [
-        # catalogue masses (EN 10219 / EN 10365); our sections have sharp
-        # corners and no root fillets
-        ("SHS 40x40x3", 3.41, 0.06),
+        # catalogue masses (EN 10219-2, EN 10365, EN 10056-1, DIN 1026-1,
+        # BS EN 10365 PFC); sections carry their corner / root / toe radii
+        ("SHS 40x40x3", 3.30, 0.01),
         ("CHS 48.3x3.2", 3.56, 0.01),
-        ("IPE200", 22.4, 0.06),
-        ("HEA160", 30.4, 0.06),
-        ("L50x50x5", 3.77, 0.03),
+        ("IPE200", 22.4, 0.01),
+        ("HEA160", 30.4, 0.01),
+        ("L50x50x5", 3.77, 0.01),
+        ("UPN100", 10.6, 0.01),
+        ("PFC200x90x30", 29.7, 0.01),
     ],
 )
 def test_mass_per_metre_close_to_catalogue(designation, kg_per_m, tol):
