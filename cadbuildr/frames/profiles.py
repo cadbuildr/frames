@@ -18,9 +18,45 @@ INCH = 25.4
 
 
 class Profile:
-    """Base class: an outer outline and an optional inner (hollow) outline."""
+    """Base class: an outer outline and an optional inner (hollow) outline.
 
-    designation: str
+    ``designation`` names the stock the way it is ordered (``SHS 40x40x3``,
+    ``IPE200``); ``area`` is the cross-section area in mm^2 and
+    ``mass_per_m(density)`` the weight in kg/m.
+    """
+
+    @property
+    def designation(self) -> str:
+        """The stock designation (a standard name when the profile came
+        from :func:`~cadbuildr.frames.standards.standard_profile`)."""
+        named = self.__dict__.get("_designation")
+        return named if named else self._default_designation()
+
+    def _default_designation(self) -> str:
+        return type(self).__name__
+
+    @property
+    def area(self) -> float:
+        """Cross-section area in mm^2."""
+        raise NotImplementedError(
+            f"{type(self).__name__} does not define its cross-section area"
+        )
+
+    @property
+    def outer_area(self) -> float:
+        """Area inside the outer outline in mm^2 (an end cap's size)."""
+        raise NotImplementedError(
+            f"{type(self).__name__} does not define its outer outline area"
+        )
+
+    def mass_per_m(self, density: float = 7850.0) -> float:
+        """Weight in kg per metre of length for a material ``density`` in
+        kg/m^3 (steel 7850, aluminium 2700, softwood ~500). A profile with a
+        catalog weight (``weight_per_m``) returns that instead."""
+        catalog = getattr(self, "weight_per_m", None)
+        if catalog is not None:
+            return float(catalog)
+        return self.area * 1e-6 * density
 
     def outer(self, sketch: Sketch) -> Any:
         raise NotImplementedError
@@ -72,6 +108,26 @@ class PolygonProfile(Profile):
     def support(self, du: float, dv: float) -> float:
         return max(u * du + v * dv for u, v in self.outer_points())
 
+    @property
+    def outer_area(self) -> float:
+        return _shoelace(self.outer_points())
+
+    @property
+    def area(self) -> float:
+        inner = self.inner_points()
+        return _shoelace(self.outer_points()) - (_shoelace(inner) if inner else 0.0)
+
+
+def _shoelace(pts: list[tuple[float, float]]) -> float:
+    n = len(pts)
+    return abs(
+        sum(
+            pts[i][0] * pts[(i + 1) % n][1] - pts[(i + 1) % n][0] * pts[i][1]
+            for i in range(n)
+        )
+        / 2.0
+    )
+
 
 def _rect(w: float, h: float) -> list[tuple[float, float]]:
     return [(-w / 2, -h / 2), (w / 2, -h / 2), (w / 2, h / 2), (-w / 2, h / 2)]
@@ -97,8 +153,7 @@ class RectTube(PolygonProfile):
         if 2 * self.wall >= min(self.width, self.height):
             raise ValueError("RectTube wall is too thick for its size")
 
-    @property
-    def designation(self) -> str:  # type: ignore[override]
+    def _default_designation(self) -> str:
         return f"RHS {self.width:g}x{self.height:g}x{self.wall:g}"
 
     def outer_points(self):
@@ -114,8 +169,7 @@ class SquareTube(RectTube):
     def __init__(self, size: float, wall: float):
         super().__init__(size, size, wall)
 
-    @property
-    def designation(self) -> str:  # type: ignore[override]
+    def _default_designation(self) -> str:
         return f"SHS {self.width:g}x{self.width:g}x{self.wall:g}"
 
 
@@ -131,8 +185,7 @@ class RoundTube(Profile):
         if 2 * self.wall >= self.diameter:
             raise ValueError("RoundTube wall is too thick for its diameter")
 
-    @property
-    def designation(self) -> str:  # type: ignore[override]
+    def _default_designation(self) -> str:
         return f"CHS {self.diameter:g}x{self.wall:g}"
 
     def outer(self, sketch: Sketch) -> Any:
@@ -140,6 +193,15 @@ class RoundTube(Profile):
 
     def inner(self, sketch: Sketch) -> Any:
         return Circle(Point(sketch, 0.0, 0.0), self.diameter / 2 - self.wall)
+
+    @property
+    def outer_area(self) -> float:
+        return math.pi / 4 * self.diameter**2
+
+    @property
+    def area(self) -> float:
+        d_in = self.diameter - 2 * self.wall
+        return math.pi / 4 * (self.diameter**2 - d_in**2)
 
     def support(self, du: float, dv: float) -> float:
         return self.diameter / 2 * math.hypot(du, dv)
@@ -154,12 +216,19 @@ class RoundBar(Profile):
     def __post_init__(self) -> None:
         _positive(diameter=self.diameter)
 
-    @property
-    def designation(self) -> str:  # type: ignore[override]
+    def _default_designation(self) -> str:
         return f"Round bar {self.diameter:g}"
 
     def outer(self, sketch: Sketch) -> Any:
         return Circle(Point(sketch, 0.0, 0.0), self.diameter / 2)
+
+    @property
+    def area(self) -> float:
+        return math.pi / 4 * self.diameter**2
+
+    @property
+    def outer_area(self) -> float:
+        return self.area
 
     def support(self, du: float, dv: float) -> float:
         return self.diameter / 2 * math.hypot(du, dv)
@@ -175,8 +244,7 @@ class RectBar(PolygonProfile):
     def __post_init__(self) -> None:
         _positive(width=self.width, height=self.height)
 
-    @property
-    def designation(self) -> str:  # type: ignore[override]
+    def _default_designation(self) -> str:
         return f"Flat bar {self.width:g}x{self.height:g}"
 
     def outer_points(self):
@@ -197,8 +265,7 @@ class Angle(PolygonProfile):
         if self.thickness >= min(self.width, self.height):
             raise ValueError("Angle thickness must be smaller than its legs")
 
-    @property
-    def designation(self) -> str:  # type: ignore[override]
+    def _default_designation(self) -> str:
         return f"L {self.width:g}x{self.height:g}x{self.thickness:g}"
 
     def outer_points(self):
@@ -224,8 +291,7 @@ class Channel(PolygonProfile):
         if self.web >= self.width or 2 * self.flange >= self.height:
             raise ValueError("Channel web/flange too thick for its size")
 
-    @property
-    def designation(self) -> str:  # type: ignore[override]
+    def _default_designation(self) -> str:
         return f"C {self.height:g}x{self.width:g}x{self.web:g}/{self.flange:g}"
 
     def outer_points(self):
@@ -259,8 +325,7 @@ class IBeam(PolygonProfile):
         if self.web >= self.width or 2 * self.flange >= self.height:
             raise ValueError("IBeam web/flange too thick for its size")
 
-    @property
-    def designation(self) -> str:  # type: ignore[override]
+    def _default_designation(self) -> str:
         return f"I {self.height:g}x{self.width:g}x{self.web:g}/{self.flange:g}"
 
     def outer_points(self):
@@ -313,6 +378,5 @@ class Lumber(RectBar):
         super().__init__(t * INCH, d * INCH)
         object.__setattr__(self, "nominal", key)
 
-    @property
-    def designation(self) -> str:  # type: ignore[override]
+    def _default_designation(self) -> str:
         return f"Lumber {self.nominal}"  # type: ignore[attr-defined]

@@ -1,22 +1,37 @@
 """Structural and woodworking frames (weldments) on CADbuildr foundation.
 
 A ``Frame`` sweeps a profile along a skeleton of line / arc segments, trims
-the corners (miter, butt, coped), adds gussets and end caps, and reports a
-cut list. Each member is its own Part inside the frame Assembly.
+the corners (miter, butt, coped), adds gussets, end caps and hole rows, and
+reports a cut list, weight and stock plan. Each member is its own Part
+inside the frame Assembly, placed by a joint and carrying anchors +
+interfaces (``end_a`` / ``end_b`` / ``axis`` / ``face_*``) other parts mate to.
+
+Library configurables (``cadbuildr.frames.catalog``): standard-size members
+(``SquareTubeMember``, ``IPEMember``…), plates (``BasePlate``,
+``TriangularGusset``) and parametric frames (``RectangularFrame``,
+``TableFrame``, ``LadderFrame``, ``GateFrame``, ``ShelvingFrame``) appear in
+the library manifest (``python -m cadbuildr.foundation.library manifest
+cadbuildr.frames``).
 """
 
 from .connectors import Connection, ConnectorRule, Placed
 from .cut_list import CutListItem
 from .frame import (
+    ALUMINIUM_DENSITY,
+    MEMBER_FACES,
+    SOFTWOOD_DENSITY,
+    STAINLESS_DENSITY,
+    STEEL_DENSITY,
     EndCap,
     EndCapPlate,
     Frame,
     FrameMember,
     Gusset,
     GussetPlate,
+    HolePattern,
     basis_transform,
 )
-from .geometry import Arc3D, Line3D, box_edges, polyline, rectangle
+from .geometry import Arc3D, Line3D, box_edges, offset_skeleton, polyline, rectangle
 from .layout import (
     DEFAULT_UP,
     FALLBACK_UP,
@@ -39,40 +54,190 @@ from .profiles import (
     RoundTube,
     SquareTube,
 )
+from .standards import (
+    AISC_W,
+    ASTM_A500_SQUARE,
+    EN10056_ANGLE,
+    EN10058_FLAT,
+    EN10060_ROUND,
+    EN10219_CHS,
+    EN10219_RHS,
+    EN10219_SHS,
+    FAMILIES,
+    HEA,
+    IPE,
+    UPN,
+    UnknownSectionError,
+    profile_from_designation,
+    standard_profile,
+)
+from .stock import (
+    STOCK_LENGTH_6M,
+    STOCK_LENGTH_20FT,
+    STOCK_LENGTH_24FT,
+    Piece,
+    PieceTooLongError,
+    StockBar,
+    StockPlan,
+    stock_plan,
+)
+from .catalog import (
+    AngleMember,
+    BasePlate,
+    ChannelMember,
+    FlatBarMember,
+    GateFrame,
+    HEAMember,
+    HSSMember,
+    IPEMember,
+    LadderFrame,
+    LumberMember,
+    RectangularFrame,
+    RectTubeMember,
+    RoundBarMember,
+    RoundTubeMember,
+    ShelvingFrame,
+    SquareTubeMember,
+    TableFrame,
+    TriangularGusset,
+    WideFlangeMember,
+    standard_member,
+)
+
+LIBRARY_ID = "frames"
+LIBRARY_NAME = "Frames and weldments"
+LIBRARY_TAB = "Frames"
+TOOLBAR = {
+    "tab": "Frames",
+    "sections": [
+        {
+            "id": "frames",
+            "label": "Frames",
+            "items": [
+                "RectangularFrame",
+                "TableFrame",
+                "ShelvingFrame",
+                "LadderFrame",
+                "GateFrame",
+            ],
+        },
+        {
+            "id": "tubes",
+            "label": "Tubes",
+            "items": [
+                "SquareTubeMember",
+                "RectTubeMember",
+                "RoundTubeMember",
+                "HSSMember",
+            ],
+        },
+        {
+            "id": "sections",
+            "label": "Beams and sections",
+            "items": [
+                "IPEMember",
+                "HEAMember",
+                "WideFlangeMember",
+                "ChannelMember",
+                "AngleMember",
+            ],
+        },
+        {
+            "id": "bars",
+            "label": "Bars and lumber",
+            "items": ["FlatBarMember", "RoundBarMember", "LumberMember"],
+        },
+        {
+            "id": "plates",
+            "label": "Plates",
+            "items": ["BasePlate", "TriangularGusset"],
+        },
+    ],
+}
 
 __all__ = [
+    "AISC_W",
+    "ALUMINIUM_DENSITY",
+    "ASTM_A500_SQUARE",
     "Angle",
+    "AngleMember",
     "Arc3D",
+    "BasePlate",
     "Channel",
+    "ChannelMember",
     "Connection",
     "ConnectorRule",
     "CutListItem",
     "DEFAULT_UP",
+    "EN10056_ANGLE",
+    "EN10058_FLAT",
+    "EN10060_ROUND",
+    "EN10219_CHS",
+    "EN10219_RHS",
+    "EN10219_SHS",
     "EndCap",
     "EndCapPlate",
     "FALLBACK_UP",
+    "FAMILIES",
+    "FlatBarMember",
     "Frame",
     "FrameLayout",
     "FrameMember",
+    "GateFrame",
     "Gusset",
     "GussetPlate",
+    "HEA",
+    "HEAMember",
+    "HSSMember",
+    "HolePattern",
     "IBeam",
+    "IPE",
+    "IPEMember",
     "Junction",
     "JunctionEnd",
     "LUMBER_SIZES_IN",
+    "LadderFrame",
     "Line3D",
     "Lumber",
+    "LumberMember",
+    "MEMBER_FACES",
     "MemberLayout",
+    "Piece",
+    "PieceTooLongError",
     "Placed",
     "Profile",
     "RectBar",
     "RectTube",
+    "RectTubeMember",
+    "RectangularFrame",
     "RoundBar",
+    "RoundBarMember",
     "RoundTube",
+    "RoundTubeMember",
+    "SOFTWOOD_DENSITY",
+    "STAINLESS_DENSITY",
+    "STEEL_DENSITY",
+    "STOCK_LENGTH_20FT",
+    "STOCK_LENGTH_24FT",
+    "STOCK_LENGTH_6M",
+    "ShelvingFrame",
     "SquareTube",
+    "SquareTubeMember",
+    "StockBar",
+    "StockPlan",
+    "TableFrame",
+    "TriangularGusset",
+    "UPN",
+    "UnknownSectionError",
+    "WideFlangeMember",
     "basis_transform",
     "box_edges",
+    "offset_skeleton",
     "polyline",
+    "profile_from_designation",
     "rectangle",
     "solve_layout",
+    "standard_member",
+    "standard_profile",
+    "stock_plan",
 ]

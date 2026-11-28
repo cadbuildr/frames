@@ -7,8 +7,17 @@ the Onshape *Frame / Frame trim / Gusset / End cap / Cut list* features as a
 library. A `Frame` sweeps a profile (square/rect/round tube, angle, channel,
 I-beam, flat/round bar, dimensional lumber) along a skeleton of line and arc
 segments, trims the corners (miter, butt "trim to", coped), adds gusset plates
-and end caps, and reports a cut list. Every member is its own `Part` inside the
-frame `Assembly`, so BOMs and exports see real cut pieces.
+and end caps, drills hole rows, and reports a cut list, weight and stock plan.
+Every member is its own `Part` inside the frame `Assembly`, placed by a joint
+and carrying anchors + interfaces (`end_a` / `end_b` / `axis` / `face_*`) other
+parts mate to, so BOMs and exports see real cut pieces.
+
+It is also a library of configurables (`@part` / `@assembly`, entry point
+`cadbuildr.libraries: frames`): standard-size members (EN 10219 SHS / RHS /
+CHS, ASTM A500 HSS, angle, UPN, IPE, HEA, AISC W, flat / round bar, lumber),
+base plates and gussets, and parametric frames (rectangular, table /
+workbench, shelving, ladder / chassis, gate) that a viewer inserts and edits
+with widgets.
 
 It composes plain foundation operations only — `Extrusion` along each segment,
 `Lathe` for bent (arc) members, cut `Extrusion`s on trim planes for miters and
@@ -17,7 +26,7 @@ foundation does (Prototype app, Hub, Playground, kernel-api). No schema nodes.
 
 ## Tags
 
-cad, python, frames, weldments, structural, steel, tube, lumber, cut-list, assembly
+cad, python, frames, weldments, structural, steel, tube, lumber, cut-list, assembly, library-configurables, interfaces
 
 ## Status
 
@@ -33,7 +42,14 @@ yellow
   rule is documented on `Frame` and below.
 - Unsupported input fails loudly (`ValueError` naming the members): overlapping
   members, a coped member wider than its host, an arc that would need cutting
-  back, a gusset on something that is not a two-member corner.
+  back, a gusset on something that is not a two-member corner, a hole that
+  runs off its member or face; `UnknownSectionError` lists the known sizes.
+- Placement by anchors and joints, never transforms: members are jointed to
+  their skeleton node, plates `connect` by interfaces (`assembly.check()`
+  reports no coordinate placements). Lay a frame out where it belongs
+  (`rectangle(center=...)`, `offset_skeleton`) instead of moving it.
+- Every configurable builds from its defaults and from each configuration
+  (`tests/test_catalog.py` walks the manifest).
 - Publish-first: depends on `cadbuildr-foundation` from PyPI only.
 
 ## Dependencies
@@ -44,7 +60,8 @@ yellow
 
 ### Downstream
 
-- None yet (to be added to the curated-libraries registry once on PyPI).
+- [cadbuildr-tslot](https://github.com/cadbuildr/tslot) (T-slot framing on the connector hook and the member `face_*` anchors)
+- The CADbuildr agent's curated-libraries registry (prompt routing adds it as a project dependency; its harness skill is `SKILL.md` here).
 
 ## Usage
 
@@ -179,26 +196,96 @@ Frame(box_edges(600, 400, 300), profile, corner="butt", connector=PostsThrough()
 - `frame.junctions`, `frame.connections` and `frame.connectors` list what
   was found and added. Without a connector the frame is unchanged.
 
+### Anchors and interfaces (mate parts onto a frame)
+
+Every `FrameMember` carries, in its local coordinates (start node at the
+origin, +X along the member):
+
+| Anchor | Where | Interface |
+|---|---|---|
+| `node_a`, `node_b` | the skeleton nodes (the frame places the member by `node_a`) | — |
+| `end_a`, `end_b` | the material ends, +Z out of the member | `PlaneFace` |
+| `axis` | at `end_a`, +Z along the member | `Shaft(d)` on round tube / bar |
+| `face_top`, `face_bottom`, `face_left`, `face_right` | outside of the profile at `end_a`, +Z out of the face, +X along the member (straight members) | `PlaneFace` |
+
+```python
+scene.connect(plate.interface("seat"), frame.member(0).interface("face_top"))
+frame.member("member_2").anchor("face_left").offset([250, 0, 0])  # 250 mm along
+```
+
+End caps connect face to face onto `end_a` / `end_b`; gussets are jointed
+to a `gusset_N` anchor on their first member.
+
+### Holes
+
+`member.drill(face="top", size="M8", count=4, margin=50)` (or `at=[...]`,
+`count=` + `pitch=`, `diameter=`, `offset=`, `through=True`) cuts a row of
+ISO 273 clearance holes and returns their anchors `hole_0…`, each with a
+`ScrewHole(size)` interface a screw / bolt mates onto.
+`Frame(..., holes=[HolePattern(member=0, face="top", size="M8", count=4,
+margin=50)])` does the same while the frame is built.
+
+### Standard sections, weight, stock
+
+```python
+from cadbuildr.frames import standard_profile, profile_from_designation, STEEL_DENSITY
+
+standard_profile("SHS", "40x40x3"); standard_profile("IPE", "IPE200")
+profile_from_designation("W8x18"); profile_from_designation("CHS 48.3x3.2")
+frame.weight(STEEL_DENSITY)          # kg: stock length x kg/m + plates
+frame.total_length()                 # {"SHS 40x40x3": 2160.0}
+print(frame.stock_plan(stock_length=6000, kerf=3).table())
+```
+
+Tables (`cadbuildr.frames.standards`): `EN10219_SHS`, `EN10219_RHS`,
+`EN10219_CHS`, `ASTM_A500_SQUARE`, `EN10056_ANGLE`, `UPN`, `IPE`, `HEA`,
+`AISC_W`, `EN10058_FLAT`, `EN10060_ROUND`, `LUMBER`. Sections stay
+simplified (sharp corners, no root fillets): masses are within a few percent
+of the catalogue.
+
+### Library configurables
+
+`python -m cadbuildr.foundation.library manifest cadbuildr.frames`:
+
+| Toolbar section | Items |
+|---|---|
+| Frames | `RectangularFrame`, `TableFrame` (shelf, end-cap or `BasePlate` feet), `ShelvingFrame`, `LadderFrame` (ladder / trailer / cart base), `GateFrame` (pickets or brace) |
+| Tubes | `SquareTubeMember`, `RectTubeMember`, `RoundTubeMember`, `HSSMember` |
+| Beams and sections | `IPEMember`, `HEAMember`, `WideFlangeMember`, `ChannelMember`, `AngleMember` |
+| Bars and lumber | `FlatBarMember`, `RoundBarMember`, `LumberMember` |
+| Plates | `BasePlate` (4 bolt holes, `top` mates onto a member end), `TriangularGusset` |
+
+Members take `size` (one configuration per table row), `length` and an
+optional hole row (`hole_count`, `hole_size`, `hole_face`, `hole_margin`).
+The parametric frames are `Frame`s, so `cut_list()`, `weight()` and
+`stock_plan()` work on them.
+
 ## Not supported (yet)
 
 - T-junctions onto arc members; mitering two arcs that are not tangent.
-- Per-corner overrides (choose which member runs through), profile offsets
-  (e.g. an angle's heel on the skeleton) and profile rotation other than
-  `up=`.
-- Weld beads, tube corner radii, hole patterns.
+- Per-corner overrides from the `Frame` call (a `ConnectorRule.choose_through`
+  does it), profile offsets (e.g. an angle's heel on the skeleton) and
+  profile rotation other than `up=`.
+- Weld beads, tube corner radii, holes on bent members, hole grids
+  (rows only).
+- `Frame` itself is not a manifest item (a skeleton has no widget yet); the
+  parametric frames are.
 
 ## Example
 
-`examples/frames_showcase.py` builds four small frames — a mitered rectangle
-with gussets, a table base (butted three-member corners, capped feet), a bent
-round-tube rail with a coped post, and a channel bracket with a butt corner —
-and prints their cut lists. Rendered in the Playground:
-[docs/funnel-evidence/frames-weldments-library/showcase.png](../../../../docs/funnel-evidence/frames-weldments-library/showcase.png).
+- `examples/frames_showcase.py` builds four small frames — a mitered
+  rectangle with gussets, a table base (butted three-member corners, capped
+  feet), a bent round-tube rail with a coped post, and a channel bracket
+  with a butt corner — laid out in place (no transforms) and prints their
+  cut lists.
+- `examples/workbench.py`: a `TableFrame` workbench with a shelf, bolt-down
+  base plates and a drilled top rail; prints the cut list, weight and stock
+  plan.
 
-User docs: `tsjs/apps/documentation/pages/Foundation/Libraries/frames.mdx`.
+User docs: https://documentation.cadbuildr.com (Foundation > Libraries > Frames).
 
 ## Tests
 
 ```bash
-cd py && uv run --frozen --package cadbuildr-frames python -m pytest packages/cadbuildr/frames/tests -q
+uv sync && uv run pytest tests -q
 ```
