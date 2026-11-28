@@ -64,6 +64,21 @@ class Profile:
     def inner(self, sketch: Sketch) -> Any | None:
         return None
 
+    def outline(self) -> tuple[list[tuple[float, float]], list[tuple[float, float]] | None]:
+        """The outer (and inner, for hollow sections) outline as points in
+        (u, v), arcs densified — what weld lengths and section properties
+        are computed from."""
+        raise NotImplementedError(
+            f"{type(self).__name__} does not define its outline points"
+        )
+
+    def section_properties(self):
+        """Area, centroid, second moments and elastic moduli
+        (:class:`~cadbuildr.frames.sections.SectionProperties`)."""
+        from .sections import section_properties
+
+        return section_properties(self)
+
     def support(self, du: float, dv: float) -> float:
         """Largest ``u*du + v*dv`` over the outline: how far the profile
         reaches in the cross-section direction ``(du, dv)``."""
@@ -90,7 +105,14 @@ def _polygon(sketch: Sketch, pts: list[tuple[float, float]]) -> Any:
 
 
 class PolygonProfile(Profile):
-    """A profile whose outline is a polygon (and optional polygon hole)."""
+    """A profile whose outline is a polygon (and optional polygon hole).
+
+    ``outer_points`` / ``inner_points`` are the sharp polygon vertices;
+    ``outer_radii`` / ``inner_radii`` (one per vertex, 0 = sharp) turn
+    corners into true arcs — root and toe radii of rolled sections, corner
+    radii of cold-formed tubes. A rounded loop is drawn as ONE
+    ``CompactPolygon`` (lines + arcs); areas, supports and section
+    properties use the rounded outline."""
 
     def outer_points(self) -> list[tuple[float, float]]:
         raise NotImplementedError
@@ -98,24 +120,59 @@ class PolygonProfile(Profile):
     def inner_points(self) -> list[tuple[float, float]] | None:
         return None
 
+    def outer_radii(self) -> list[float] | None:
+        return None
+
+    def inner_radii(self) -> list[float] | None:
+        return None
+
+    def _loop(self, pts, radii):
+        from .sections import rounded_polygon
+
+        if pts is None:
+            return None
+        if radii and any(r > 0 for r in radii):
+            return rounded_polygon(pts, radii)
+        return [(u, v, 0.0) for u, v in pts]
+
+    def outer_loop(self):
+        """Outer outline as ``(u, v, bulge)`` vertices."""
+        return self._loop(self.outer_points(), self.outer_radii())
+
+    def inner_loop(self):
+        return self._loop(self.inner_points(), self.inner_radii())
+
+    def outline(self):
+        from .sections import densify
+
+        inner = self.inner_loop()
+        return densify(self.outer_loop()), (densify(inner) if inner else None)
+
+    def _draw(self, sketch: Sketch, pts, radii) -> Any:
+        if radii and any(r > 0 for r in radii):
+            from .sections import draw_loop, rounded_polygon
+
+            return draw_loop(sketch, rounded_polygon(pts, radii))
+        return _polygon(sketch, pts)
+
     def outer(self, sketch: Sketch) -> Any:
-        return _polygon(sketch, self.outer_points())
+        return self._draw(sketch, self.outer_points(), self.outer_radii())
 
     def inner(self, sketch: Sketch) -> Any | None:
         pts = self.inner_points()
-        return _polygon(sketch, pts) if pts else None
+        return self._draw(sketch, pts, self.inner_radii()) if pts else None
 
     def support(self, du: float, dv: float) -> float:
-        return max(u * du + v * dv for u, v in self.outer_points())
+        return max(u * du + v * dv for u, v in self.outline()[0])
 
     @property
     def outer_area(self) -> float:
-        return _shoelace(self.outer_points())
+        return _shoelace(self.outline()[0])
 
     @property
     def area(self) -> float:
-        inner = self.inner_points()
-        return _shoelace(self.outer_points()) - (_shoelace(inner) if inner else 0.0)
+        outer, inner = self.outline()
+        return _shoelace(outer) - (_shoelace(inner) if inner else 0.0)
 
 
 def _shoelace(pts: list[tuple[float, float]]) -> float:
@@ -142,16 +199,39 @@ def _positive(**dims: float) -> None:
 @dataclass(frozen=True, repr=False)
 class RectTube(PolygonProfile):
     """Rectangular hollow section ``width`` (u) x ``height`` (v), wall ``wall``.
-    Corners are sharp (no outer radius) — a simplification of rolled tube."""
+
+    ``corner_radius`` is the outer corner radius ``r_o`` (the inner one is
+    ``r_o - wall``, never below 0). 0 (the default) draws sharp corners;
+    ``standard_profile("SHS" / "RHS", ...)`` uses the EN 10219-2 values
+    (:func:`en10219_corner_radius`)."""
 
     width: float
     height: float
     wall: float
+    corner_radius: float = 0.0
 
     def __post_init__(self) -> None:
         _positive(width=self.width, height=self.height, wall=self.wall)
         if 2 * self.wall >= min(self.width, self.height):
             raise ValueError("RectTube wall is too thick for its size")
+        if self.corner_radius < 0 or 2 * self.corner_radius > min(
+            self.width, self.height
+        ):
+            raise ValueError(
+                f"RectTube corner_radius {self.corner_radius:g} does not fit a "
+                f"{self.width:g} x {self.height:g} section"
+            )
+
+    @property
+    def inner_corner_radius(self) -> float:
+        return max(self.corner_radius - self.wall, 0.0)
+
+    def outer_radii(self):
+        return [self.corner_radius] * 4 if self.corner_radius > 0 else None
+
+    def inner_radii(self):
+        r = self.inner_corner_radius
+        return [r] * 4 if r > 0 else None
 
     def _default_designation(self) -> str:
         return f"RHS {self.width:g}x{self.height:g}x{self.wall:g}"
@@ -166,8 +246,8 @@ class RectTube(PolygonProfile):
 class SquareTube(RectTube):
     """Square hollow section ``size`` x ``size``, wall ``wall``."""
 
-    def __init__(self, size: float, wall: float):
-        super().__init__(size, size, wall)
+    def __init__(self, size: float, wall: float, corner_radius: float = 0.0):
+        super().__init__(size, size, wall, corner_radius)
 
     def _default_designation(self) -> str:
         return f"SHS {self.width:g}x{self.width:g}x{self.wall:g}"
@@ -193,6 +273,13 @@ class RoundTube(Profile):
 
     def inner(self, sketch: Sketch) -> Any:
         return Circle(Point(sketch, 0.0, 0.0), self.diameter / 2 - self.wall)
+
+    def outline(self):
+        from .sections import circle_points
+
+        return circle_points(self.diameter / 2), circle_points(
+            self.diameter / 2 - self.wall
+        )
 
     @property
     def outer_area(self) -> float:
@@ -221,6 +308,11 @@ class RoundBar(Profile):
 
     def outer(self, sketch: Sketch) -> Any:
         return Circle(Point(sketch, 0.0, 0.0), self.diameter / 2)
+
+    def outline(self):
+        from .sections import circle_points
+
+        return circle_points(self.diameter / 2), None
 
     @property
     def area(self) -> float:
@@ -254,16 +346,31 @@ class RectBar(PolygonProfile):
 @dataclass(frozen=True, repr=False)
 class Angle(PolygonProfile):
     """Equal or unequal angle (L section): legs ``width`` (u) and ``height``
-    (v), ``thickness``. The heel is at the -u/-v corner of the bounding box."""
+    (v), ``thickness``. The heel is at the -u/-v corner of the bounding box.
+
+    ``root_radius`` (EN 10056-1 ``r1``, inside the heel) and ``toe_radius``
+    (``r2``, the inner edge of each leg tip) round the rolled outline; 0
+    (the default) is sharp. ``standard_profile("L", ...)`` sets the
+    tabulated radii."""
 
     width: float
     height: float
     thickness: float
+    root_radius: float = 0.0
+    toe_radius: float = 0.0
 
     def __post_init__(self) -> None:
         _positive(width=self.width, height=self.height, thickness=self.thickness)
         if self.thickness >= min(self.width, self.height):
             raise ValueError("Angle thickness must be smaller than its legs")
+        if self.root_radius < 0 or self.toe_radius < 0:
+            raise ValueError("Angle radii must be >= 0")
+        if self.toe_radius >= self.thickness:
+            raise ValueError("Angle toe_radius must be smaller than its thickness")
+
+    def outer_radii(self):
+        r1, r2 = self.root_radius, self.toe_radius
+        return [0.0, 0.0, r2, r1, r2, 0.0] if (r1 or r2) else None
 
     def _default_designation(self) -> str:
         return f"L {self.width:g}x{self.height:g}x{self.thickness:g}"
@@ -277,12 +384,22 @@ class Angle(PolygonProfile):
 class Channel(PolygonProfile):
     """C / U channel: ``height`` (v, web depth) x ``width`` (u, flange
     width), web thickness ``web``, flange thickness ``flange``. The web is at
-    -u, the flanges open towards +u."""
+    -u, the flanges open towards +u.
+
+    Rolled shape options (0 = sharp / parallel, the defaults):
+    ``root_radius`` (web-to-flange fillet, ``r1`` / ``r``), ``toe_radius``
+    (inner edge of the flange tip, ``r2``) and ``taper`` — the slope of the
+    inner flange faces (0.08 = 8 % for DIN 1026-1 UPN; 0 for parallel-flange
+    PFC / UPE). With a taper, ``flange`` is the thickness at half the flange
+    width from the back of the web (DIN 1026-1, figure 1)."""
 
     height: float
     width: float
     web: float
     flange: float
+    root_radius: float = 0.0
+    toe_radius: float = 0.0
+    taper: float = 0.0
 
     def __post_init__(self) -> None:
         _positive(
@@ -290,19 +407,30 @@ class Channel(PolygonProfile):
         )
         if self.web >= self.width or 2 * self.flange >= self.height:
             raise ValueError("Channel web/flange too thick for its size")
+        if min(self.root_radius, self.toe_radius, self.taper) < 0 or self.taper > 0.2:
+            raise ValueError("Channel radii must be >= 0 and taper in 0..0.2")
+
+    def outer_radii(self):
+        r1, r2 = self.root_radius, self.toe_radius
+        if not (r1 or r2):
+            return None
+        return [0.0, 0.0, r2, r1, r1, r2, 0.0, 0.0]
 
     def _default_designation(self) -> str:
         return f"C {self.height:g}x{self.width:g}x{self.web:g}/{self.flange:g}"
 
     def outer_points(self):
         w, h, tw, tf = self.width / 2, self.height / 2, self.web, self.flange
+        k = self.taper
+        toe = tf - k * w  # flange thickness at the tip (u = +w)
+        root = tf + k * (w - tw)  # at the web face (u = -w + tw)
         return [
             (-w, -h),
             (w, -h),
-            (w, -h + tf),
-            (-w + tw, -h + tf),
-            (-w + tw, h - tf),
-            (w, h - tf),
+            (w, -h + toe),
+            (-w + tw, -h + root),
+            (-w + tw, h - root),
+            (w, h - toe),
             (w, h),
             (-w, h),
         ]
@@ -311,12 +439,14 @@ class Channel(PolygonProfile):
 @dataclass(frozen=True, repr=False)
 class IBeam(PolygonProfile):
     """I / H beam: ``height`` (v) x flange ``width`` (u), ``web`` and
-    ``flange`` thicknesses (no root fillets)."""
+    ``flange`` thicknesses, ``root_radius`` (web-to-flange fillet, 0 =
+    sharp; the EN 10365 tables set it)."""
 
     height: float
     width: float
     web: float
     flange: float
+    root_radius: float = 0.0
 
     def __post_init__(self) -> None:
         _positive(
@@ -324,6 +454,14 @@ class IBeam(PolygonProfile):
         )
         if self.web >= self.width or 2 * self.flange >= self.height:
             raise ValueError("IBeam web/flange too thick for its size")
+        if self.root_radius < 0:
+            raise ValueError("IBeam root_radius must be >= 0")
+
+    def outer_radii(self):
+        r = self.root_radius
+        if not r:
+            return None
+        return [0.0, 0.0, 0.0, r, r, 0.0, 0.0, 0.0, 0.0, r, r, 0.0]
 
     def _default_designation(self) -> str:
         return f"I {self.height:g}x{self.width:g}x{self.web:g}/{self.flange:g}"
