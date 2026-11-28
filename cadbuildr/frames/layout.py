@@ -30,7 +30,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
-from typing import Callable, Literal, Optional, Sequence
+from typing import Any, Callable, Literal, Optional, Sequence
 
 from .geometry import (
     NODE_TOLERANCE,
@@ -78,6 +78,10 @@ class EndCut:
     trim_point: Vec | None = None
     trim_normal: Vec | None = None  # points away from the kept material
     cope_member: int | None = None  # index of the member this end is coped to
+    # end preparation on a single member (PreparedTube, FrameMember.cope /
+    # bevel): an end_prep.Cope, an end_prep.Bevel
+    cope: Any = None
+    bevel: Any = None
 
     @property
     def needs_trim(self) -> bool:

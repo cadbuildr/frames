@@ -250,6 +250,19 @@ def box_edges(
     return bottom + top + posts
 
 
+def offset_skeleton(segments: Iterable[Segment], by: Sequence[float]) -> list[Segment]:
+    """The skeleton moved by ``by`` = ``(dx, dy, dz)`` mm: lay a frame out
+    where it belongs instead of transforming the built assembly."""
+    d = vec(by)
+    out: list[Segment] = []
+    for s in segments:
+        if isinstance(s, Arc3D):
+            out.append(Arc3D(add(s.start, d), add(s.through, d), add(s.end, d)))
+        else:
+            out.append(Line3D(add(s.start, d), add(s.end, d)))
+    return out
+
+
 def skeleton_normal(segments: Sequence[Segment]) -> Vec | None:
     """Normal of the skeleton's plane (pointing to +Z where possible), or
     ``None`` when the skeleton is not planar."""
